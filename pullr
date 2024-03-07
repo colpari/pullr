@@ -1,0 +1,156 @@
+#!/bin/dash
+
+
+#NOTE:
+# - requires git >= 2.41.0 for git fetch --porcelain support
+# - repositories need to be on a current branch
+# - there must be only one remote known to hold the current branch
+# - unsure if we want to support repository paths containing spaces
+
+MYSELF=$(basename $0)
+
+usage() {
+  cat << EOF >&2
+Usage: $MYSELF [-v] [-d]
+
+    -v : verbose operation
+    -d : dry run. do not change state of repositories
+EOF
+  exit 1
+}
+
+VERBOSE=
+DRY_RUN=
+
+while getopts dv o; do
+  case $o in
+    (d) DRY_RUN=1;;
+    (v) VERBOSE=1;;
+    (*) usage
+  esac
+done
+shift "$((OPTIND - 1))"
+
+
+if ! ERROR_BUFFER=$(mktemp)
+then
+    echo "unable to create temp file" 1>&2
+    exit 77
+fi
+
+
+gitPull() {
+
+    L="$1"
+
+    # looks like a repo?
+    test -d "$L" && test -d "$L/.git" || return
+
+    # # check if there was no space in input line
+    # if ! test -z "$SECOND_WORD"
+    # then
+    #     echo "repository path '$L $SECOND_WORD' contains at least one white space character - this not supported" 1>&2
+    #     return
+    # fi
+
+    # can we cd into it? skip otherwise.
+    cd "$L" || return
+
+    # determine current branch
+    if ! BRANCH=$(git branch --show-current) || test -z "$BRANCH"
+    then
+        printf '%-30s %-30s %s\n' "$L" "???" "ERROR getting current branch"
+        cd - >/dev/null
+        return
+    fi
+
+    # git fetch. sadly git fetch --porcelain outputs non-errors on stderr too, so save stderr to a tempfile if we really fail
+    GIT_FETCH_OUTPUT=$(git fetch --porcelain -v --dry-run 2>"$ERROR_BUFFER")
+    GIT_FETCH_RC=$?
+
+    # if not successfull output 3rd word==ERROR and a message on stdout and the stderr from git fetch
+    if [ $GIT_FETCH_RC != 0 ]
+    then
+        # git fetch failed. forward it's stderr output and output 3rd word==ERROR and a message
+        printf '%-30s %-30s %s\n' "$L" "$BRANCH" "ERROR git-fetch returned $GIT_FETCH_RC"
+        #TODO: make customizeable if we reply the git stderr output?
+        #cat "$ERROR_BUFFER" 1>&2
+        cd - >/dev/null
+        return
+    fi
+
+    # find updates from remotes from git fetch output
+    #SECURITY: we use the output of git branch --show-current as input to egrep.
+    #   this means you should trust the git binary to not return phonky branch names (and the remote server too)
+    # TODO: maybe not grep here but shell-glob .git/refs/remotes/.+/$BRANCH ?
+    REMOTES_WITH_BRANCH=$(echo "$GIT_FETCH_OUTPUT"| egrep " refs/remotes/.+/$BRANCH$")
+
+    # assert exactly one remote with that branch. TODO: make configurable?
+    # TODO: performance. can we do that with dash internals (e.g. find any line break)?
+    REMOTES_WITH_BRANCH_COUNT=$(echo "$REMOTES_WITH_BRANCH"|wc -l)
+    if [ "x$REMOTES_WITH_BRANCH_COUNT" != "x1" ]
+    then
+        printf '%-30s %-30s %s\n' "$L" "$BRANCH" "ERROR $REMOTES_WITH_BRANCH_COUNT remotes for branch $BRANCH"
+        cd - >/dev/null
+        return
+    fi
+
+    # split output from git fetch into at most 4 fields.
+    # TODO: this is really ugly but the only way to feed a variable into read without using a subshell
+    #   is there a better way for dash/posix sh? bash would handle it with read -a ARRAY_NAME
+    if ! read COL1 COL2 COL3 COL4 << EOF
+$REMOTES_WITH_BRANCH
+EOF
+    then
+        # this should only fail if something is really odd. output 3rd word==ERROR and a message
+        printf '%-30s %-30s %s\n' "$L" "$BRANCH" "ERROR decoding fetch output: '$REMOTES_WITH_BRANCH'"
+        cd - >/dev/null
+        return
+    fi
+
+    # if the first column of output from git fetch is not a '=' - we're not up2date
+    if [ "x$COL1" != "x=" ]
+    then
+        # output what will be done
+        if [ -z "$COL4" ]
+        then
+            # first column was empty (we only got 3) -> fast forward update.
+            # output 3rd word=new_revision, 4th word = ref-name of the remote
+            #echo "$COL2 $COL3"
+            printf '%-30s %-30s %s\n' "$L" "$BRANCH" "$COL2"
+        else
+            # first column was NOT empty (we have 4) -> other state.
+            # output 3rd word=new_revision, 4th word = ref-name of the remote, 5th word = state flag from git fetch
+            #echo "$COL3 $COL4 $COL1"
+            printf '%-30s %-30s %s\n' "$L" "$BRANCH" "$COL3 $COL1"
+        fi
+
+        if test -z "$DRY_RUN"
+        then
+            if test -z "$VERBOSE"
+            then
+                git pull -q
+            else
+                git pull
+            fi
+        fi
+    fi
+
+    cd - >/dev/null
+}
+
+if [ -z "$*" ]
+then
+    while read L
+    do
+        gitPull "$L"
+    done
+else
+    for D in "$@"
+    do
+        gitPull "$D"
+    done
+fi
+
+
+rm -f "$ERROR_BUFFER"

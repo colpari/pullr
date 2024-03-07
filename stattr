@@ -1,0 +1,74 @@
+#!/bin/dash
+
+#TODO:
+# - optional git fetch
+# - optional output of clean directories and branches
+
+gitStatus() {
+
+    L="$1"
+
+    # looks like a repo?
+    test -d "$L" && test -d "$L/.git" || return
+
+    # can we cd into it? skip otherwise.
+    cd "$L" || return
+
+    # # output first word, directory name
+    # printf '%-30s ' "$L"
+
+    # determine current branch
+    if ! BRANCH=$(git branch --show-current) || test -z "$BRANCH"
+    then
+        # output first word=directory name and second word=branch
+        printf '%-30s %-30s ' "$L" "???"
+        # output 3rd word==ERROR and error message
+        echo "ERROR getting current branch"
+        cd - >/dev/null
+        return
+    fi
+
+    # # output 2nd word (branch name)
+    # printf '%-30s ' "$BRANCH"
+
+    #git fetch --all -q
+
+    # fetch status
+    if ! STATUS=$(git status --porcelain -vv --ahead-behind -b) || test -z "$STATUS"
+    then
+        # output first word=directory name and second word=branch
+        printf '%-30s %-30s ' "$L" "$BRANCH"
+        # output 3rd word==ERROR and error message
+        echo "ERROR $STATUS"
+        cd - >/dev/null
+        return
+    fi
+
+    # digest status
+    WC_STATUS=$(echo "$STATUS" | egrep -v '^## ' | awk '{print $1}' | sort -r |uniq -c)
+    BRANCH_STATUS=$(echo "$STATUS" | egrep '^##.+ \['|sed -e 's/.*\[/[/g')
+
+    # output if not empty
+    if ! test -z "$WC_STATUS$BRANCH_STATUS"
+    then
+        # output first word, directory name and second wird branch
+        printf '%-30s %-30s ' "$L" "$BRANCH"
+        echo $WC_STATUS $BRANCH_STATUS
+    fi
+
+    cd - >/dev/null
+}
+
+
+if [ -z "$*" ]
+then
+    while read L
+    do
+        gitStatus "$L"
+    done
+else
+    for D in "$@"
+    do
+        gitStatus "$D"
+    done
+fi
