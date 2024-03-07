@@ -24,7 +24,7 @@ gitStatus() {
         printf '%-30s %-30s ' "$L" "???"
         # output 3rd word==ERROR and error message
         echo "ERROR getting current branch"
-        cd - >/dev/null
+        cd - >/dev/null || exit 127
         return
     fi
 
@@ -40,14 +40,14 @@ gitStatus() {
         printf '%-30s %-30s ' "$L" "$BRANCH"
         # output 3rd word==ERROR and error message
         echo "ERROR $STATUS"
-        cd - >/dev/null
+        cd - >/dev/null || exit 127
         return
     fi
 
     # digest status
     # NOTE: |xargs echo -n is the point where shoud start using something more sophisticated than posix sh :-D
-    WC_STATUS=$(echo "$STATUS" | egrep -v '^## ' | awk '{print $1}' | sort -r |uniq -c|xargs echo -n)
-    BRANCH_STATUS=$(echo "$STATUS" | egrep '^##.+ \['|sed -e 's/.*\[/[/')
+    WC_STATUS=$(echo "$STATUS" | grep -Ev '^## ' | awk '{print $1}' | sort -r |uniq -c|xargs echo -n)
+    BRANCH_STATUS=$(echo "$STATUS" | grep -E '^##.+ \['|sed -e 's/.*\[/[/')
 
     # output if not empty
     if ! test -z "$WC_STATUS$BRANCH_STATUS"
@@ -55,13 +55,13 @@ gitStatus() {
         printf '%-30s %-30s %s %s\n' "$L" "$BRANCH" "$WC_STATUS" "$BRANCH_STATUS"
     fi
 
-    cd - >/dev/null
+    cd - >/dev/null || exit 127
 }
 
 
 if [ -z "$*" ]
 then
-    while read L
+    while read -r L
     do
         gitStatus "$L"
     done
