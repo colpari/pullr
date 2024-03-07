@@ -2,7 +2,7 @@
 
 
 #NOTE:
-# - requires git >= 2.41.0 for git fetch --porcelain support
+# - requires git >= 2.41.0 for support of git fetch --porcelain
 # - repositories need to be on a current branch
 # - there must be only one remote known to hold the current branch
 # - unsure if we want to support repository paths containing spaces
@@ -15,17 +15,20 @@ Usage: $MYSELF [-v] [-d]
 
     -v : verbose operation
     -d : dry run. do not change state of repositories
+    -i : ignore errors. continue fetching if a repo fails (non-repo items are always ignored)
 EOF
   exit 1
 }
 
 VERBOSE=
 DRY_RUN=
+IGNORE_ERRORS=
 
-while getopts dv o; do
-  case $o in
-    (d) DRY_RUN=1;;
+while getopts vdi o; do
+  case "$o" in
     (v) VERBOSE=1;;
+    (d) DRY_RUN=1;;
+    (i) IGNORE_ERRORS=1;;
     (*) usage
   esac
 done
@@ -43,29 +46,30 @@ gitPull() {
 
     L="$1"
 
-    # looks like a repo?
-    test -d "$L" && test -d "$L/.git" || return
-
-    # # check if there was no space in input line
-    # if ! test -z "$SECOND_WORD"
-    # then
-    #     echo "repository path '$L $SECOND_WORD' contains at least one white space character - this not supported" 1>&2
-    #     return
-    # fi
+    # looks like a repo? skip otherwise.
+    test -d "$L" && test -d "$L/.git" || return 0
 
     # can we cd into it? skip otherwise.
-    cd "$L" || return
+    cd "$L" || return 0
 
     # determine current branch
-    if ! BRANCH=$(git branch --show-current) || test -z "$BRANCH"
+    if ! BRANCH=$(git branch --show-current)
     then
         printf '%-30s %-30s %s\n' "$L" "???" "ERROR getting current branch"
         cd - >/dev/null
-        return
+        return 1
+    fi
+
+    if test -z "$BRANCH"
+    then
+        # not on a branch - skip
+        printf '%-30s %-30s\n' "$L" "---"
+        cd - >/dev/null
+        return 0
     fi
 
     # git fetch. sadly git fetch --porcelain outputs non-errors on stderr too, so save stderr to a tempfile if we really fail
-    GIT_FETCH_OUTPUT=$(git fetch --porcelain -v --dry-run 2>"$ERROR_BUFFER")
+    GIT_FETCH_OUTPUT=$(git fetch --porcelain -v --dry-run -n 2>"$ERROR_BUFFER")
     GIT_FETCH_RC=$?
 
     # if not successfull output 3rd word==ERROR and a message on stdout and the stderr from git fetch
@@ -76,7 +80,7 @@ gitPull() {
         #TODO: make customizeable if we reply the git stderr output?
         #cat "$ERROR_BUFFER" 1>&2
         cd - >/dev/null
-        return
+        return $GIT_FETCH_RC
     fi
 
     # find updates from remotes from git fetch output
@@ -92,12 +96,12 @@ gitPull() {
     then
         printf '%-30s %-30s %s\n' "$L" "$BRANCH" "ERROR $REMOTES_WITH_BRANCH_COUNT remotes for branch $BRANCH"
         cd - >/dev/null
-        return
+        return 1
     fi
 
     # split output from git fetch into at most 4 fields.
     # TODO: this is really ugly but the only way to feed a variable into read without using a subshell
-    #   is there a better way for dash/posix sh? bash would handle it with read -a ARRAY_NAME
+    #   is there a better way for dash/posix sh? bash would do it nicer
     if ! read COL1 COL2 COL3 COL4 << EOF
 $REMOTES_WITH_BRANCH
 EOF
@@ -105,22 +109,25 @@ EOF
         # this should only fail if something is really odd. output 3rd word==ERROR and a message
         printf '%-30s %-30s %s\n' "$L" "$BRANCH" "ERROR decoding fetch output: '$REMOTES_WITH_BRANCH'"
         cd - >/dev/null
-        return
+        return 1
     fi
 
-    # if the first column of output from git fetch is not a '=' - we're not up2date
+    RC=
+
+    # if the first column of output from git fetch is not a '=' - we're not up2date with the remote
     if [ "x$COL1" != "x=" ]
     then
-        # output what will be done
-        if [ -z "$COL4" ]
+        # first output what will/would be done
+
+        if [ -z "$COL4" ] #
         then
             # first column was empty (we only got 3) -> fast forward update.
-            # output 3rd word=new_revision, 4th word = ref-name of the remote
+            # output 3rd word=new_revision
             #echo "$COL2 $COL3"
             printf '%-30s %-30s %s\n' "$L" "$BRANCH" "$COL2"
         else
             # first column was NOT empty (we have 4) -> other state.
-            # output 3rd word=new_revision, 4th word = ref-name of the remote, 5th word = state flag from git fetch
+            # output 3rd word=new_revision, 4th word = state flag from git fetch
             #echo "$COL3 $COL4 $COL1"
             printf '%-30s %-30s %s\n' "$L" "$BRANCH" "$COL3 $COL1"
         fi
@@ -130,27 +137,63 @@ EOF
             if test -z "$VERBOSE"
             then
                 git pull -q
+                RC="$?"
             else
                 git pull
+                RC="$?"
             fi
+        fi
+    else
+        # we're up2date with the remote, but it might still not be locally merged - compare fetch ref with local branch head
+        if [ "x$COL3" != "x$(cat ".git/refs/heads/$BRANCH")" ]
+        then
+            printf '%-30s %-30s %s\n' "$L" "$BRANCH" "$COL3"
+
+            if test -z "$DRY_RUN"
+            then
+                if test -z "$VERBOSE"
+                then
+                    git pull -q
+                    RC="$?"
+                else
+                    git pull
+                    RC="$?"
+                fi
+            fi
+        elif [ -n "$VERBOSE" ]
+        then
+            printf '%-30s %-30s %s\n' "$L" "$BRANCH" "$COL3"
         fi
     fi
 
     cd - >/dev/null
+
+    return ${RC:-0}
 }
+
+EC=
 
 if [ -z "$*" ]
 then
     while read L
     do
-        gitPull "$L"
+        if ! gitPull "$L"
+        then
+            EC=77
+            [ -n "$IGNORE_ERRORS" ] || break
+        fi
     done
 else
     for D in "$@"
     do
-        gitPull "$D"
+        if ! gitPull "$D"
+        then
+            EC=77
+            [ -n "$IGNORE_ERRORS" ] || break
+        fi
     done
 fi
 
-
 rm -f "$ERROR_BUFFER"
+
+exit ${EC:-0}
