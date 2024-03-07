@@ -45,15 +45,14 @@ gitStatus() {
     fi
 
     # digest status
-    WC_STATUS=$(echo "$STATUS" | egrep -v '^## ' | awk '{print $1}' | sort -r |uniq -c)
-    BRANCH_STATUS=$(echo "$STATUS" | egrep '^##.+ \['|sed -e 's/.*\[/[/g')
+    # NOTE: |xargs echo -n is the point where shoud start using something more sophisticated than posix sh :-D
+    WC_STATUS=$(echo "$STATUS" | egrep -v '^## ' | awk '{print $1}' | sort -r |uniq -c|xargs echo -n)
+    BRANCH_STATUS=$(echo "$STATUS" | egrep '^##.+ \['|sed -e 's/.*\[/[/')
 
     # output if not empty
     if ! test -z "$WC_STATUS$BRANCH_STATUS"
     then
-        # output first word, directory name and second wird branch
-        printf '%-30s %-30s ' "$L" "$BRANCH"
-        echo $WC_STATUS $BRANCH_STATUS
+        printf '%-30s %-30s %s %s\n' "$L" "$BRANCH" "$WC_STATUS" "$BRANCH_STATUS"
     fi
 
     cd - >/dev/null
